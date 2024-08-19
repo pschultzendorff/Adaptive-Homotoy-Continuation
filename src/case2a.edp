@@ -1,0 +1,32 @@
+real m = 1;
+
+func real funca(real s) {
+	return 2*s + sin(m*s)*cos((m^2)*s);
+}
+
+func real funcaprime(real s) {
+    return 2 + m*cos(m*s)*cos((m^2)*s) - m*sin(m*s)*sin((m^2)*s);
+}
+
+func uEx = 10*x*(x-1)*y*(y-1); 	// exact solution
+func dxuEx = 10*(2*x-1)*y*(y-1);  	// exact solution x derivative
+func dyuEx = 10*(2*y-1)*x*(x-1);  	// exact solution y derivative
+func duExSize = sqrt(dxuEx^2+dyuEx^2); // exact solution gradient magnitude
+func gd = uEx; 		// exact solution on the Dirichlet boundary
+func uh0 = 10*sin(x)*cos(y); // very bad initial guess, just to get things started
+
+// source function f
+func aGr = 2*duExSize + sin(m*duExSize)*cos((m^2)*x); // a(|grad u|)
+func dxxuEx = 20*y*(y-1);  	// exact solution xx derivative
+func dxyuEx = 10*(2*y-1)*(2*x-1);  	// exact solution xy derivative
+func dyyuEx = 20*x*(x-1);  	// exact solution yy derivative
+func dxaGrbb = 2 + m*(cos(m*duExSize)*cos((m^2)*duExSize) - m*sin(m*duExSize)*sin((m^2)*duExSize)); // a'(|grad u|) building block
+func dxaGr = dxaGrbb*(dxuEx*dxxuEx+dyuEx*dxyuEx)/duExSize; // a(|grad u|) x derivative
+func dyaGr = dxaGrbb*(dxuEx*dxyuEx+dyuEx*dyyuEx)/duExSize; // a(|grad u|) y derivative
+func f = -(dxaGr*dxuEx+aGr*dxxuEx)-(dyaGr*dyuEx+aGr*dyyuEx); // - div (a(|grad u|) grad u)
+
+// define the computational mesh
+func mesh GenerateMesh(int nds) {
+    mesh Th = square(nds,nds); // generate a triangular mesh of a square domain
+    return Th;
+}

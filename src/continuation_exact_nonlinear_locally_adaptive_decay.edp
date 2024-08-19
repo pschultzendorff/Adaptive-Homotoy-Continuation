@@ -1,0 +1,726 @@
+/*********************************************************************
+ * DOI~
+ * usage: cript for FreeFem++
+ * file: hc.edp
+ * author: 
+ * based on scripts by Fréderic Hecht, Zuqi Tang, Benjamin Stamm, and Ari Rappaport
+ * June 2024
+
+ NOTE: Everything is just in L^2 norms, not in energy norms.
+ *********************************************************************/
+
+// loading packages not loaded by default
+load "Element_Mixte" 	// the Raviart-Thomas elements for flux equilibration
+load "Element_P3"	 	// the Lagrange P3 element 
+load "Element_P4"	 	// the Lagrange P4 element
+verbosity = 1;			// FreeFem++ verbosity (level of reported compilation and execution details)
+
+//**************************************
+//  USER INPUT
+//**************************************
+
+int nds = 10; // number of mesh points on one unit boundary edge of the domain Omega
+
+macro Pcont P1		// Lagrange pw polynomial space of the FE approximation: "P1" or "P2" or "P3" or "P4"
+macro Pcontl P0		// Lagrange pw polynomial space of the gradient of the FE approximation: "P1" or "P2" or "P3"
+macro Pcontp P2		// polynomials for plotting the exact solution (ideally Pcont + 1): "P2" or "P3" or "P4"
+macro RT RT1		// RT pw polynomial space: "RT0" or "RT1" or "RT2" (more not available in FreeFem++)
+macro Pdisc P1dc	// Lagrange multipliers of the RT space: "P0" or "P1dc" or "P2dc"
+
+// Error and estimator arrays
+
+int case = 1;
+string runname = "exact_nonlinear_solve_adaptive_decay_case_" + case;
+
+real L = 10000.0; // Lipschitz-continuity constant, defines the strength of the nonlinearity.
+real s0 = 1.0;
+real m = 500;
+int MaxPicardIter = 20; // Maximum number of iterates before break.
+int MaxContIter = 100;
+real SolverTol = 1e-7; // Tolerance for non-adaptive stopping criteria.
+real ContinuationUpdateTol = 100; // Tolerance for max. error due to updated continuation.
+real Gamma1 = 0.1; // Factor for adaptive stopping criteria continuation.
+real Gamma2 = 0.1; // Factor for adaptive stopping criteria linearization.
+
+bool PlotSolEx = 0, PlotSolAppr = 1, PlotSolApprFluxes = 0, PlotRecFlux = 0, PlotErr = 0, PlotEst = 1, PlotDetails = 0; // What to plot.
+bool SaveGnuPlot = 1;
+bool Wait = 0;
+
+int verb = 0; // Verbosity for demonstrations and debugging.
+
+//**************************************
+//   Useful settings
+//**************************************
+//func real funca(real s)
+//{
+//  return (1 + (L - 1)/sqrt(1 + s^2));
+//}
+func real phi(real s) {
+	if (s <= s0) return 0.5 * (s - s0)^2 + s0 * s - 0.5 * (s0^2);
+	if (s > s0) return m * 0.5 * (s - s0)^2 + s0 * s - 0.5 * (s0^2);
+}
+
+func real phiprime(real s) {
+	if (s <= s0) return s;
+	if (s > s0) return  m * (s - s0) + s0;
+}
+
+func real funca(real s) {
+	return phiprime(s) / s;
+}
+
+
+// exact solution and its derivatives
+// boundary condition gd
+// source function f
+
+// CASE 1 
+func uEx = x*(x-1)*y*(y-1); 	// exact solution
+func dxuEx = (2*x-1)*y*(y-1);  	// exact solution x derivative
+func dyuEx = (2*y-1)*x*(x-1);  	// exact solution y derivative
+func duExSize = sqrt(dxuEx^2+dyuEx^2); // exact solution gradient magnitude
+func gd = uEx; 		// exact solution on the Dirichlet boundary
+func uh0 = 10*sin(x)*cos(y); // very bad initial guess, just to get things started
+
+// source function f
+func aGr = (1+(L-1)*(1+duExSize^2)^(-0.5)); // a(|grad u|) 
+func dxxuEx = 2*y*(y-1);  	// exact solution xx derivative
+func dxyuEx = (2*y-1)*(2*x-1);  	// exact solution xy derivative
+func dyyuEx = 2*x*(x-1);  	// exact solution yy derivative
+func dxaGrbb = -0.5*(L-1)*(1+duExSize^2)^(-1.5); // a(|grad u|) building block
+func dxaGr = 2*dxaGrbb*(dxuEx*dxxuEx+dyuEx*dxyuEx); // a(|grad u|) x derivative
+func dyaGr = 2*dxaGrbb*(dxuEx*dxyuEx+dyuEx*dyyuEx); // a(|grad u|) y derivative
+func f = -(dxaGr*dxuEx+aGr*dxxuEx)-(dyaGr*dyuEx+aGr*dyyuEx); // - div (a(|grad u|) grad u)
+
+// define the computational mesh
+mesh Th = square(nds,nds); // generate a triangular mesh of a square domain
+
+/*
+// CASE 2 (vertex singularity)
+if (case == 2)
+func theta=atan2(y, x)-2*pi*fmin(sign(y),0); // we need the angle theta between 0 and 3*pi/2
+func r=(x^2+y^2)^(1/2.0); // radius
+func uEx = r^(2/3.0)*sin(2*theta/3.0); 	// exact solution in polar coordinates
+func dxuEx = -2*sin(theta/3.0)/r^(1/3.0)/3.0;  	// exact solution x derivative - simplified expression and 3.0 for the C++ convention
+func dyuEx = 2*cos(theta/3.0)/r^(1/3.0)/3.0;  	// exact solution y derivative - simplified expression and 3.0 for the C++ convention
+func duExSize = sqrt(dxuEx^2+dyuEx^2); // exact solution gradient magnitude
+func f = 0; 	// right-hand side source term
+func gd = r^(2/3.0)*sin(2*theta/3.0);  	// exact solution on the Dirichlet boundary
+
+// domain boundary segments
+border b1(t=0, 1){x=t; y=0; label=1;};
+border b2(t=0, 1){x=1; y=t; label=1;};
+border b3(t=0, 2){x=1-t; y=1; label=1;};
+border b4(t=0, 2){x=-1; y=1-t; label=1;};
+border b5(t=0, 1){x=-1+t; y=-1; label=1;};
+border b6(t=0, 1){x=0; y=-1+t; label=1;};
+//define the computational mesh 
+mesh Th = buildmesh(b1(nds) + b2(nds) + b3(2*nds) + b4(2*nds) + b5(nds) + b6(nds));
+real aevx=0, aevy=0; // vertex coordinates of a patch for detailed plots
+int trdet1=231, trdet2=457; // triangle numbers for detailed plots
+if(PlotDetails && verb>=2)
+	plot(Th, wait=Wait, cmm="L-shaped domain and mesh", ps="00_L_shaped_domain_mesh.eps");
+*/
+
+// macro definitions
+macro Div(u1,u2) (dx(u1)+dy(u2))  //
+macro Grad(u) [dx(u),dy(u)]   //
+
+macro norm(u) sqrt(u[0]^2 + u[1]^2) //
+macro an(v) funca(norm(v)) //
+
+macro Pdiscp P2dc	// polynomials for plotting the fluxes: "P2dc"
+macro NbIso 21		// number of isovalues for plotting (more than 20 unless FreeFem++ bug fixed)
+macro SolverGlob sparsesolver	// global system linear solver: CG or sparsesolver
+macro SolverLoc sparsesolver	// local systems linear solver: LU or sparsesolver
+
+real kapreg = nds*1e-5; // regularization hack for the local equilibration
+real em = 0.99, ep = 1.01; // to avoid rounding errors for visualisation
+
+// standard matlab jet colormap
+real[int] jet = [0.6667, 1.0000, 0.5625,  0.6667, 1.0000, 0.6250,  0.6667, 1.0000, 0.6875,  0.6667, 1.0000, 0.7500,  0.6667, 1.0000, 0.8125, 0.6667, 1.0000, 0.8750,
+ 0.6667, 1.0000, 0.9375, 0.6667, 1.0000, 1.0000, 0.6563, 1.0000, 1.0000, 0.6458, 1.0000, 1.0000, 0.6354, 1.0000, 1.0000, 0.6250, 1.0000, 1.0000, 0.6146, 1.0000, 1.0000,
+ 0.6042, 1.0000, 1.0000, 0.5938, 1.0000, 1.0000, 0.5833, 1.0000, 1.0000, 0.5729, 1.0000, 1.0000, 0.5625, 1.0000, 1.0000, 0.5521, 1.0000, 1.0000, 0.5417, 1.0000, 1.0000,
+ 0.5313, 1.0000, 1.0000, 0.5208, 1.0000, 1.0000, 0.5104, 1.0000, 1.0000, 0.5000, 1.0000, 1.0000, 0.4889, 0.9375, 1.0000, 0.4762, 0.8750, 1.0000, 0.4615, 0.8125, 1.0000,
+ 0.4444, 0.7500, 1.0000, 0.4242, 0.6875, 1.0000, 0.4000, 0.6250, 1.0000, 0.3704, 0.5625, 1.0000, 0.3333, 0.5000, 1.0000, 0.2963, 0.5625, 1.0000, 0.2667, 0.6250, 1.0000,
+ 0.2424, 0.6875, 1.0000, 0.2222, 0.7500, 1.0000, 0.2051, 0.8125, 1.0000, 0.1905, 0.8750, 1.0000, 0.1778, 0.9375, 1.0000, 0.1667, 1.0000, 1.0000, 0.1563, 1.0000, 1.0000,
+ 0.1458, 1.0000, 1.0000, 0.1354, 1.0000, 1.0000, 0.1250, 1.0000, 1.0000, 0.1146, 1.0000, 1.0000, 0.1042, 1.0000, 1.0000, 0.0938, 1.0000, 1.0000, 0.0833, 1.0000, 1.0000,
+ 0.0729, 1.0000, 1.0000, 0.0625, 1.0000, 1.0000, 0.0521, 1.0000, 1.0000, 0.0417, 1.0000, 1.0000, 0.0313, 1.0000, 1.0000, 0.0208, 1.0000, 1.0000, 0.0104, 1.0000, 1.0000,
+ 0, 1.0000, 1.0000, 0, 1.0000, 0.9375, 0, 1.0000, 0.8750, 0, 1.0000, 0.8125, 0, 1.0000, 0.7500, 0, 1.0000, 0.6875, 0, 1.0000, 0.6250, 0, 1.0000, 0.5625, 0, 1.0000, 0.5000];
+
+// grayscale colormap
+real[int] gray(192);
+for(int i=0; i<64; i++)
+	{
+	gray[3*i]=0;
+	gray[3*i+1]=0;
+	gray[3*i+2]=real(i)/63;
+	}
+
+// inverse grayscale colormap
+real[int] grayinv(192);
+for(int i=0; i<64; i++)
+	{
+	grayinv[3*i]=0;
+	grayinv[3*i+1]=0;
+	grayinv[3*i+2]=1-real(i)/63;
+	}
+
+//**************************************
+// CODE
+//**************************************
+
+// FE approximation space and variables
+fespace Vh(Th,Pcont); // piecewise continuous polynomials of degree Pcont on the mesh Th
+Vh uh, uhprev = uh0, vh;  // FE approximation, previous iterate, and test function
+
+// Homotopy continuation parameters.
+real lambda = 1;
+
+// Bilinear form of the Picard step; uhprev is the previous iterate.
+varf a(uh,vh)=int2d(Th)((1 - lambda)*an(Grad(uhprev))*Grad(uh)'*Grad(vh)
+	+ lambda*(Grad(uh)'*Grad(vh)))
+    + int2d(Th)(f*vh)
+	+ on(1,2,3,4,uh=gd);
+
+func int ContinuationStep(real decay) {
+	/*
+	Take one homotopy continuation step.
+
+	..math::
+		\lambda = C \lambda
+
+	Parameters:
+
+	Returns:
+		int: 0 
+
+	*/
+
+	lambda = lambda * decay;
+}
+
+
+func int PicardStep() {
+	/*
+	Compute the next FE approximation by one Picard step.
+
+	..math::
+
+	Parameters:
+
+	Returns:
+		int: 0 
+
+	*/
+	matrix A=a(Vh,Vh,solver=SolverGlob);
+	real[int] b=a(0,Vh);
+	uh[]=A^-1*b;
+}
+
+func int FPlotSolEx() {
+	/*
+	Visualisation of the exact solution.
+
+	..math::
+		u = 
+
+	Parameters:
+
+	Returns:
+		int: 0
+
+	*/
+	fespace Vhp(Th,Pcontp); // ideally one order higher piecewise continuous polynomials on the mesh Th
+	Vhp uvis=uEx;   // visualisation of the exact solution by Lagrange interpolation into the Vhp space
+	real[int]isovalues=em*uvis[].min:(ep*uvis[].max-em*uvis[].min)/(NbIso-1):ep*uvis[].max; // isovalues from minimal to maximal value
+	plot(uvis, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="exact solution", ps="01_exact_solution.eps");
+}
+
+
+func int FPlotSolAppr() {
+	/*
+	Visualisation of the numerical approximation to u.
+
+	..math::
+		u_h \approx 
+
+	Parameters:
+
+	Returns:
+		int: 0
+
+	*/
+	real[int]isovalues2=em*uh[].min:(ep*uh[].max-em*uh[].min)/(NbIso-1):ep*uh[].max;	// isovalues from minimal to maximal value
+	plot(uh, wait=Wait, value=1, fill=1, viso=isovalues2, hsv=jet, cmm="numerical approximation", ps="02_numer_approximation.eps");
+}
+
+func int FPlotSolApprFluxes() {
+	/*
+	Visualisation of the exact and numerical approximation fluxes.
+
+	..math::
+
+	Parameters:
+
+	Returns:
+		int: 0
+
+	*/
+	fespace Vhp(Th,Pdiscp); // piecewise discontinuous polynomials on the mesh Th
+	Vhp uvisdx=-an([dxuEx,dyuEx])*dxuEx, uvisdy=-an([dxuEx,dyuEx])*dyuEx;   // visualisation of the exact flux by Lagrange interpolation into the Vhp space
+	Vhp uhx=-an(Grad(uh))*dx(uh), uhy=-an(Grad(uh))*dy(uh); // visualisation of the approximate flux by Lagrange interpolation into the Vhp space
+	plot(Th,[uvisdx,uvisdy], wait=Wait, value=1, hsv=jet, cmm="exact flux", ps="03_exact_flux.eps");
+	plot(Th,[uhx,uhy], wait=Wait, value=1, hsv=jet, cmm="finite element flux", ps="04_finite_element_flux.eps");
+}
+
+fespace Wh(Th,Pdisc); // space
+Wh Pif, wh; // Wh Piff = f; would be elementwise Lagrange interplolation
+func int UpdatePif() {
+	/*
+	Data approximation by L2 projection.
+	*/
+	varf L2proj(Pif,wh)=int2d(Th)(Pif*wh) + int2d(Th)(f*wh); // L2 scalar product
+	matrix MassMatr=L2proj(Wh,Wh,solver=SolverLoc); // mass matrix
+	real[int] MassRHS=L2proj(0,Wh); // f on the RHS
+	Pif[]=MassMatr^-1*MassRHS; // L2-orthogonal projection of f
+}
+UpdatePif();
+
+// Space of piecewise constant polynomials for various plots.
+fespace Wh0(Th,P0);
+
+//*******************************************
+// Flux reconstruction by local equilibration
+//*******************************************
+
+// RT function spaces and variables.
+fespace RTGlob(Th,[RT,Pdisc]); // global
+RTGlob [sigma1,sigma2,pot]=[0,0,0]; // global equilibrated flux and potential
+
+func int ComputEquilFlux() {
+	/*
+	Compute the equilibrated flux.
+
+	..math::
+		\sigma_h := \lambda \int_K (I_d - \kappa)  
+
+	Parameters:
+
+	Returns:
+		real: 
+
+	*/
+
+	fespace Vh1(Th,P1); // continuous piecewise affine polynomials
+	Vh1 psia=0;  // later: P1 hat function of the given vertex
+
+	mesh ThLoc=Th; // auxiliary mesh used for flux equilibration
+	fespace WhLoc(ThLoc,Pdisc); // local RT Lagrange multiplier space
+	fespace RTLoc(ThLoc,[RT,Pdisc]); // local
+
+	// global-local numbering
+	RTGlob [gnum1,gnum2,gnum3]; // auxiliary fields
+	gnum1[]= 1:gnum1[].n; // gnum1[] contains numbering of global DoFs, starting from 1, to #DoFs
+
+	for(int i=0; i<Th.nv; ++i) { // run through all vertices of the mesh
+		psia[][i]=1; // define the hat function for vertex i
+
+		//local to global numbering
+		int[int] n2o;
+
+		// patch around the vertex i as a support of the hat function psia
+		// label=10 for edges not previously at the boundary
+		// truncates the space RTLoc to the patch only
+		// sets the local to global numbering n2o
+		ThLoc = trunc(Th,psia>0,label=10, new2old = n2o); 
+
+		// link local -- global space
+		int[int] RRT = restrict(RTLoc, RTGlob, n2o);
+
+		if(verb>=2) plot(ThLoc, wait=Wait);
+
+		if (int1d(ThLoc)(psia)<1e-12) // check for an interior vertex  
+			{
+			ThLoc=change(ThLoc,flabel=10); // make sure label=10 on the whole boundary of the patch
+			if(verb>=2) cout << "label i " << i << " x" << Th(i).x << " y" << Th(i).y << endl;
+			}
+
+		RTLoc [sga1,sga2,gma],[v1,v2,q]; // variables for local patchwise equilibrated flux contributions
+
+		// local flux equilibration variational form
+		// zero normal flux on label = 10 boundary
+		// same as for the linear diffusion in TP1
+		varf a([sga1,sga2,gma],[v1,v2,q]) = int2d(ThLoc)([sga1,sga2]'*[v1,v2]
+			- gma*Div(v1,v2) - Div(sga1,sga2)*q - kapreg*kapreg*gma*q)+ on(10, sga1=0, sga2=0);
+
+		// matrix of the local flux equilibration
+		// same as for the linear diffusion in TP1
+		matrix MatrLocEquil=a(RTLoc,RTLoc, solver=SolverLoc); //LU also possible
+
+		// local flux equilibration right-hand side	form
+		// zero normal flux on label = 10 boundary
+		// multiplication by an(Grad(uhprev)) wrt linear diffusion in TP1
+		varf l([unsused1,unsused2,unsused3],[v1,v2,q]) = int2d(ThLoc)(
+			- psia*((an(Grad(uhprev))*Grad(uh))'*[v1,v2] + f*q)
+			+ Grad(psia)'*(an(Grad(uhprev))*Grad(uh))*q)
+			+ on(10, unsused1 = 0, unsused2 = 0);
+
+		RTLoc [F,F1,F2]; // right-hand side variables
+		F[] = l(0,RTLoc); // right-hand side of the local flux equilibration
+
+		// solve the local equilibration problem to get [sigma1_a, sigma2_a, gamma_a]
+		sga1[] = MatrLocEquil^-1*F[]; // sga1[] contains the triplet sga1,sga2,gma
+
+		// write the local solution [sigma1_a, sigma2_a] into the global function [sigma1,sigma2] using the local to global numbering
+		sigma1[](RRT) += sga1[];	
+
+		psia[][i]=0; // undefine the hat function for vertex i
+	}
+}
+
+func real H1ErrDist() {
+	/*
+	Compute the exact H1-seminorm error and error distribution.
+
+	..math::
+		\|\nabla (u - u_h)\|_K
+
+	Parameters:
+
+	Returns:
+		real: 
+
+	*/
+
+	varf ErrDistForm(unused,chiK) = int2d(Th)(
+		chiK*((Grad(uh)-[dxuEx,dyuEx])'
+		*(Grad(uh)-[dxuEx,dyuEx])));
+
+	Wh0 ErrDistField;
+	ErrDistField[]=ErrDistForm(0,Wh0);
+	real H1Error=sqrt(ErrDistField[].sum);
+	ErrDistField=sqrt(ErrDistField);
+	if(PlotErr)
+		{
+		real[int]isovalues=0:ErrDistField[].max/(NbIso-1):ErrDistField[].max; // isovalues from minimal to maximal value
+		plot(ErrDistField, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="H1 errors", ps="09_H1_errors.eps");
+		}
+	cout << "H1 error " << H1Error << endl;
+	return H1Error;
+}
+
+func real FluxErrDist() {
+	/*
+	Compute the exact flux error and error distribution.
+
+	..math::
+		\|a(|\nabla u|) \nabla u - a(|\nabla u_h|) u_h)\|_K
+
+	Parameters:
+
+
+	Returns:
+		real: FluxError
+
+	*/
+
+	varf FluxDistForm(unused,chiK) = int2d(Th)(
+		chiK*((an(Grad(uh))*Grad(uh)-an([dxuEx,dyuEx])*[dxuEx,dyuEx])'
+		*(an(Grad(uh))*Grad(uh)-an([dxuEx,dyuEx])*[dxuEx,dyuEx])));
+	Wh0 FluxDistField;
+ 	FluxDistField[]=FluxDistForm(0,Wh0);
+ 	real FluxError=sqrt(FluxDistField[].sum);
+ 	FluxDistField=sqrt(FluxDistField);
+	if(PlotErr) {
+		real[int]isovalues=0:FluxDistField[].max/(NbIso-1):FluxDistField[].max; // isovalues from minimal to maximal value
+		plot(FluxDistField, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="flux errors", ps="10_flux_errors.eps");
+	}
+	cout << "flux error " << FluxError << endl;
+  	return FluxError;
+}
+
+func real ContErrDist() {
+	/*
+	Compute the exact continuation error and error distribution.
+
+	..math::
+		\|a(|\nabla u_{h,\lambda}|) \nabla u_{h,\lambda} - a(|\nabla u_h|) u_h)\|_K
+
+	Parameters:
+
+
+	Returns:
+		real: FluxError
+
+	*/
+
+	varf FluxDistForm(unused,chiK) = int2d(Th)(
+		chiK*((an(Grad(uh))*Grad(uh)-an([dxuEx,dyuEx])*[dxuEx,dyuEx])'
+		*(an(Grad(uh))*Grad(uh)-an([dxuEx,dyuEx])*[dxuEx,dyuEx])));
+	Wh0 FluxDistField;
+ 	FluxDistField[]=FluxDistForm(0,Wh0);
+ 	real FluxError=sqrt(FluxDistField[].sum);
+ 	FluxDistField=sqrt(FluxDistField);
+	if(PlotErr) {
+		real[int]isovalues=0:FluxDistField[].max/(NbIso-1):FluxDistField[].max; // isovalues from minimal to maximal value
+		plot(FluxDistField, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="flux errors", ps="10_flux_errors.eps");
+	}
+	cout << "flux error " << FluxError << endl;
+  	return FluxError;
+}
+
+
+func real ComputeSeqDist() {
+	/*
+	Compute the error between two iterates and its distribution.
+
+	..math::
+		\|\nabla (u_h^{i + 1} - u_h^i)\|)
+
+	Parameters:
+
+	Returns:
+		real: SeqErr
+
+	*/
+ 	varf SeqDistForm(unused,chiK) = int2d(Th)(chiK*((Grad(uh)-Grad(uhprev))'*(Grad(uh)-Grad(uhprev))));
+	Wh0 SeqDistField;
+ 	SeqDistField[]=SeqDistForm(0,Wh0);
+ 	real SeqErr=sqrt(SeqDistField[].sum);
+ 	SeqDistField=sqrt(SeqDistField);
+	cout << "difference of iterates " <<  SeqErr << endl;
+  	return SeqErr;
+}
+
+real FluxEst, OscEst;
+Wh0 DiscEstDist;
+func real ComputeDiscEstDist() {
+	/*
+	Compute the a posteriori estimate and distribution of the discretization error.
+
+	..math::
+		\eta_K := \lambda \int_K (I_d - \kappa)  
+
+	Parameters:
+
+	Returns:
+		real: DiscEst
+
+	Writes:
+		Wh0: DiscEstDist
+		real: FluxEst
+		real: OscEst
+
+	*/
+
+ 	varf EstDistFormFlux(unused,chiK) = int2d(Th)(
+		chiK*((an(Grad(uh))*Grad(uh) + [sigma1,sigma2])'
+		*(an(Grad(uh))*Grad(uh) + [sigma1,sigma2])));
+ 	varf EstDistFormOsc(unused,chiK) = int2d(Th)(
+		chiK*(hTriangle*hTriangle/pi/pi*(f-Pif)*(f-Pif)));
+
+ 	Wh0 FluxEstDist, OscEstDist;
+	FluxEstDist[]=EstDistFormFlux(0,Wh0);
+ 	OscEstDist[]=EstDistFormOsc(0,Wh0);
+
+	DiscEstDist=sqrt(FluxEstDist)+sqrt(OscEstDist);
+	DiscEstDist=DiscEstDist*DiscEstDist;
+
+	real DiscEst=sqrt(DiscEstDist[].sum);
+	cout << "equilibrated flux estimator " << DiscEst << endl;
+ 	FluxEst=sqrt(FluxEstDist[].sum);
+	cout << "flux part " << FluxEst << endl;
+ 	OscEst=sqrt(OscEstDist[].sum);
+	cout << "oscillation part " << OscEst << endl;
+
+	// TODO: Does this have to be squared or not???
+	DiscEstDist=sqrt(DiscEstDist);
+
+  	Wh0 DivEstDist;
+  	real DivEst;
+
+	// Compute the divergence misfit of the equilibrated flux.
+	varf EstDistFormDiv(unused,chiK) = int2d(Th)(
+		chiK*((Pif-Div(sigma1,sigma2))*(Pif-Div(sigma1,sigma2))));
+
+	DivEstDist[]=EstDistFormDiv(0,Wh0);
+	DivEstDist=sqrt(DivEstDist);
+  	if(PlotRecFlux) {
+		fespace Vhp(Th,Pdiscp); // piecewise discontinuous polynomials on the mesh Th
+		Vhp sigma1vis=sigma1, sigma2vis=sigma2;
+		plot(Th, [sigma1vis, sigma2vis], wait=Wait, value=1, hsv=jet, cmm="equilibrated flux", ps="07_equilibrated_flux.eps");
+    	real[int]isovalues=0:DivEstDist[].max/(NbIso-1):DivEstDist[].max;
+    	plot(DivEstDist, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="divergence misfit of the equilibrated flux", ps="08_equilibrated_flux_divergence_misfit.eps");
+	}
+	DivEstDist=DivEstDist*DivEstDist;
+
+	DivEst=sqrt(DivEstDist[].sum);
+  	cout << "divergence check for the equilibrated flux " << DivEst << endl;
+  	return DiscEst;
+}
+
+Wh0 ContEstDist;
+func real ComputeContEstDist() {
+	/*
+	Compute the a posteriori error estimate and distribution of the continuation error.
+
+	..math::
+		\eta_{C,K}(u_{h}) := \|I_d - a(|\nabla u_{h}|)) \nabla u_{h}\|_K  
+
+
+	Note: To calculate the estimate for the error between the FEM solution at
+		:math:`\lambda_1` and the FEM solution at :math:`\lambda_2`, the estimator needs
+		to be multiplied with :math:`\Delta \lambda := \lambda_2 - \lambda_1`
+
+	..math::
+		\eta_{C,K,\lambda_1}(u_{h,\lambda}) := \Delta \lambda \|I_d - a(|\nabla
+		u_{h,\lambda_2}|)) \nabla u_{h,\lambda_2}\|_K  
+
+		If :math:`\lambda_1 = 0` and :math:`\lambda_2 = \lambda,` this reads
+	..math::
+		\eta_{C,K,0}(u_{h,\lambda}) := \Delta \lambda \|I_d - a(|\nabla u_{h,\lambda}|))
+		\nabla u_{h,\lambda}\|_K
+
+	Parameters:
+
+	Returns:
+		real: ContEst
+
+	Writes:
+		Wh0: ContEstDist
+
+	*/
+ 	varf EstDistFormCont(unused,chiK) = int2d(Th)(
+		chiK*(((1 - an(Grad(uh)))*Grad(uh))'*((1 - an(Grad(uh)))*Grad(uh)))
+	);
+	ContEstDist[]=EstDistFormCont(0,Wh0);
+	real ContEst=sqrt(ContEstDist[].sum);
+	cout << "continuation estimator " << ContEst << endl;
+	ContEstDist=sqrt(ContEstDist);
+  	return ContEst;
+}
+
+
+// Plot the estimator distribution.
+func int PlotEstDist() {
+	real[int] isovalues=0:DiscEstDist[].max/(NbIso-1):DiscEstDist[].max;
+	plot(DiscEstDist, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="equilibrated flux estimators", ps="11_eq_flux_estimators.eps");
+	isovalues=0:ContEstDist[].max/(NbIso-1):ContEstDist[].max;
+	plot(ContEstDist, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="continuation error estimators", ps="12_cont_estimators.eps");
+	//real[int]isovalues2=0:OscEstDist[].max/(NbIso-1):OscEstDist[].max;
+	//plot(OscEstDist, wait=Wait, value=1, fill=1, viso=isovalues2, hsv=jet, cmm="data oscillations", ps="11_data_oscillations.eps");
+}
+
+
+// Effectivities
+real H1EffInd, FluxEffInd;
+int l = 0; // Continuation iterate counter
+int k = 0; // Picard iterate counter
+real LoopErr = SolverTol + 1; // Picard iterate error
+
+// To create gnuplot plots
+include "../plot.edp"
+
+// Todo: This should be arrays of arrays!
+real[int] ContEsts(MaxContIter + 1);
+real[int] DiscEsts(MaxContIter + 1);
+real[int] H1Errors(MaxContIter + 1);
+real[int] FluxErrors(MaxContIter + 1);
+real[int] ContIterations(MaxContIter + 1);
+real[int] PicardIterations(MaxContIter + 1);
+real[int] lambdas(MaxContIter + 1);
+
+// Solver
+fespace VhVec(Th,[Pcontl, Pcontl]); // Space for object based on the gradient
+VhVec [d1, d2];
+VhVec [l1, l2];
+VhVec [s1, s2];
+
+// Initialize the estimators.
+real DiscEst = 1;
+real ContEst = Gamma1*DiscEst + 1;
+real ContEstGoal = ContEst;
+real ContEstNext = Gamma1*DiscEst + 1;
+
+// Initialize the decay.
+real DeltaLambda = 0;
+real Decay = 1;
+
+while((l < MaxContIter) && (ContEstGoal > Gamma1*DiscEst)) {
+	cout << "======= Continuation step  l = " << l + 1 <<  " =======" << endl;
+	cout << "===================== lambda = " << lambda <<  " =======" << endl;
+
+	// Nonlinear solver
+	k = 0;
+	//LoopErr = ComputeSeqDist();
+	LoopErr = SolverTol + 1;
+	while((k < MaxPicardIter) && (LoopErr > SolverTol)) {
+		cout <<  "============= Picard step k = " << k + 1 <<  " =======" << endl << endl;
+		PicardStep();
+		LoopErr = ComputeSeqDist();
+		if (LoopErr > ContinuationUpdateTol) {
+			cout <<  "Nonlinear error " << LoopErr <<  " > Continuation Update tolerance " << ContinuationUpdateTol << endl;
+		}
+		uhprev = uh;
+		k++;
+	}
+	if (LoopErr < SolverTol) {
+		cout << "Tolerance reached" << endl;
+	}
+	if (k >= MaxPicardIter) {
+		cout << "MaxPicardIter reached" << endl;
+	}
+
+	// Compute error estimates.
+	[sigma1,sigma2,pot]=[0,0,0];
+	UpdatePif();
+	ComputEquilFlux();
+	ContEst = ComputeContEstDist();
+	ContEstGoal = ContEst * lambda;
+	DiscEst = ComputeDiscEstDist();
+	ContEsts[l] = ContEst;
+	DiscEsts[l] = DiscEst;
+    H1Errors[l] = H1ErrDist();
+	FluxErrors[l] = FluxErrDist();
+	ContIterations[l] = l + 1;
+	PicardIterations[l] = k + 1;
+	lambdas[l] = lambda;
+	FluxEffInd=DiscEsts[l]/FluxErrors[l];
+	cout << "Effectivity index, flux error " << FluxEffInd << endl;
+
+	// Plot solutions
+	if(PlotSolEx) FPlotSolEx();
+	if(PlotSolAppr) FPlotSolAppr();
+	if(PlotSolApprFluxes) FPlotSolApprFluxes();
+	if(PlotEst) PlotEstDist();
+
+	// Update lambda
+	DeltaLambda = min(ContinuationUpdateTol / ContEst, lambda*0.95);
+	Decay = (lambda - DeltaLambda) / lambda;
+	cout << "Decay set to " << Decay << endl;
+	ContinuationStep(Decay);
+	l += 1;
+}
+
+if (l >= MaxContIter) {
+	cout << "MaxContIter reached" << endl;
+}
+if (ContEstGoal < Gamma1*DiscEst) {
+	cout << "Continuation error smaller than " << Gamma1 << " times discretization error" << endl;
+}
+
+if (SaveGnuPlot) {
+	SetupSemiLogYPlot(runname, "Continuation step k", "Error and estimators");
+	string datafile;
+	datafile = "Flux error";
+	AddPlotToOutput(ContIterations, FluxErrors, runname,  datafile);
+	datafile = "Discretization estimator";
+	AddPlotToOutput(ContIterations, DiscEsts, runname, datafile);
+	datafile = "Continuation estimator";
+	AddPlotToOutput(ContIterations, PicardIterations, runname, datafile);
+	datafile = "No. Picard iterations";
+	AddPlotToOutput(ContIterations, ContEsts, runname, datafile);
+	datafile = "lambda";
+	AddPlotToOutput(ContIterations, lambdas, runname, datafile);
+}

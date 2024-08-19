@@ -1,0 +1,4 @@
+int nds = 10; // number of mesh points on one unit boundary edge of the domain Omega
+
+int MaxNonlinearIter = 50; // Maximum number of iterates before break.
+real NonlinearSolverTol = 1e-7; // Tolerance for nonlinear solver.

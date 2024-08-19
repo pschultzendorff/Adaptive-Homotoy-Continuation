@@ -1,0 +1,881 @@
+/*********************************************************************
+ * DOI~
+ * usage: cript for FreeFem++
+ * file: hc.edp
+ * author: 
+ * based on scripts by Fréderic Hecht, Zuqi Tang, Benjamin Stamm, and Ari Rappaport
+ * June 2024
+
+ NOTE: Everything is just in L^2 norms, not in energy norms.
+ *********************************************************************/
+
+
+//**************************************
+//  USER INPUT
+//**************************************
+verbosity = 1; // FreeFem++ verbosity (level of reported compilation and execution details).
+int verb = 0; // Verbosity for demonstrations and debugging.
+
+string case = "1";
+string folder = "./Newton_continuation/case" + case + "/";
+exec("mkdir " + folder + " -p");
+string runname;
+
+include "./case1.edp";
+include "./macros.edp";
+include "./plot.edp";
+include "./parameters.edp";
+
+// Continuation parameters
+int MaxContIter = 50;
+real Lambda = 1; // Homotopy continuation parameter.
+real Gamma1 = 0.1; // Factor for adaptive stopping criteria continuation.
+real Decay = 0.8; // Decay for the homotopy continuation.
+
+bool PlotSolEx = 0, PlotSolAppr = 1, PlotSolApprFluxes = 0, PlotRecFlux = 0, PlotErr = 0, PlotEst = 0, PlotDetails = 0; // What to plot.
+bool SaveGnuPlot = 1;
+bool Wait = 0; // Wait for keyboard input after each plot.
+
+
+//**************************************
+// CODE
+//**************************************
+
+// Homotopy continuation
+func real funcalambda(real s) {
+	return Lambda + (1 - Lambda) * funca(s);
+}
+
+func real funcalambdaprime(real s) {
+	return (1 - Lambda) * funcaprime(s);
+}
+
+real kapreg = nds*1e-5; // regularization hack for the local equilibration
+
+// Diffusivity function and mesh are defined in "./casej.edp".
+macro an(v) funca(norm(v)) //
+macro anlambda(v) funcalambda(norm(v)) //
+macro anprime(v) funcaprime(norm(v)) //
+macro anlambdaprime(v) funcalambdaprime(norm(v)) //
+
+mesh Th = GenerateMesh(nds);
+
+// FE approximation space and variables
+fespace Vh(Th,Pcont); // piecewise continuous polynomials of degree Pcont on the mesh Th
+Vh uh, uhprev = uh0, vh, uDelta;  // FE approximation, previous iterate, test function, and Newton update
+
+// Bilinear form of the Newton step; uhprev is the previous iterate.
+// The system has DF u^{n-1} on the RHS s.t. the solution to the system is the new value
+// for u.
+varf a(uh,vh)=int2d(Th)((anlambdaprime(Grad(uhprev))/norm(Grad(uhprev))*(Grad(uhprev)'*Grad(uh))) * (Grad(uhprev)'*Grad(vh)) + (anlambda(Grad(uhprev))*Grad(uh)'*Grad(vh)))
+	- int2d(Th)(anlambda(Grad(uhprev))*Grad(uhprev)'*Grad(vh) - f*vh)
+	+ int2d(Th)(anlambdaprime(Grad(uhprev))/norm(Grad(uhprev))*(Grad(uhprev)'*Grad(uhprev)) * (Grad(uhprev)'*Grad(vh)) + (anlambda(Grad(uhprev))*Grad(uhprev)'*Grad(vh)))
+	+ on(1,2,3,4,uh=gd);
+
+matrix Jac;
+func int NonlinearStep() {
+	/*
+	Compute the next FE approximation by one nonlinear iteration.
+
+	..math::
+
+	Parameters:
+
+	Returns:
+		int: 0 
+
+	*/
+	matrix A = a(Vh,Vh,solver=SolverGlob);
+	Jac = A;
+
+	real[int] b = a(0,Vh);
+	uh[] = A^(-1)*b;
+	uDelta[] = uh[] - uhprev[];
+}
+
+matrix JacPrev;
+real DeltaLambda, LambdaPrev;
+func int ContinuationStep() {
+	/*
+	Take one homotopy continuation step.
+
+	..math::
+		\lambda = C \lambda
+
+	Parameters:
+
+	Returns:
+		int: 0 
+
+	*/
+	// Store final Jacobian from previous continuation step.
+	JacPrev = Jac;
+
+	LambdaPrev = Lambda;
+	Lambda = Lambda * Decay;
+	DeltaLambda = LambdaPrev - Lambda;
+}
+
+func int FPlotSolEx() {
+	/*
+	Visualisation of the exact solution.
+
+	..math::
+		u = 
+
+	Parameters:
+
+	Returns:
+		int: 0
+
+	*/
+	fespace Vhp(Th,Pcontp); // ideally one order higher piecewise continuous polynomials on the mesh Th
+	Vhp uvis=uEx;   // visualisation of the exact solution by Lagrange interpolation into the Vhp space
+	real[int]isovalues=em*uvis[].min:(ep*uvis[].max-em*uvis[].min)/(NbIso-1):ep*uvis[].max; // isovalues from minimal to maximal value
+	plot(uvis, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="exact solution", ps=folder+"01_exact_solution.eps");
+}
+
+func int FPlotSolAppr() {
+	/*
+	Visualisation of the numerical approximation to u.
+
+	..math::
+		u_h \approx 
+
+	Parameters:
+
+	Returns:
+		int: 0
+
+	*/
+	real[int]isovalues2=em*uh[].min:(ep*uh[].max-em*uh[].min)/(NbIso-1):ep*uh[].max;	// isovalues from minimal to maximal value
+	plot(uh, wait=Wait, value=1, fill=1, viso=isovalues2, hsv=jet, cmm="numerical approximation", ps=folder+"02_numer_approximation.eps");
+}
+
+func int FPlotSolApprFluxes() {
+	/*
+	Visualisation of the exact and numerical approximation fluxes.
+
+	..math::
+
+	Parameters:
+
+	Returns:
+		int: 0
+
+	*/
+	fespace Vhp(Th,Pdiscp); // piecewise discontinuous polynomials on the mesh Th
+	Vhp uvisdx=-anlambda([dxuEx,dyuEx])*dxuEx, uvisdy=-anlambda([dxuEx,dyuEx])*dyuEx;   // visualisation of the exact flux by Lagrange interpolation into the Vhp space
+	Vhp uhx=-anlambda(Grad(uh))*dx(uh), uhy=-anlambda(Grad(uh))*dy(uh); // visualisation of the approximate flux by Lagrange interpolation into the Vhp space
+	plot(Th,[uvisdx,uvisdy], wait=Wait, value=1, hsv=jet, cmm="exact flux", ps=folder+"03_exact_flux.eps");
+	plot(Th,[uhx,uhy], wait=Wait, value=1, hsv=jet, cmm="finite element flux", ps=folder+"04_finite_element_flux.eps");
+}
+
+fespace Wh(Th,Pdisc); // space
+Wh Pif, wh; // Wh Piff = f; would be elementwise Lagrange interplolation
+func int UpdatePif() {
+	/*
+	Approximation of data by L2 projection.
+
+	..math::
+		f_h = \Sigma_{L^2}(f)
+
+	Parameters:
+
+	Returns:
+
+	*/
+	varf L2proj(Pif,wh)=int2d(Th)(Pif*wh) + int2d(Th)(f*wh); // L2 scalar product
+	matrix MassMatr=L2proj(Wh,Wh,solver=SolverLoc); // mass matrix
+	real[int] MassRHS=L2proj(0,Wh); // f on the RHS
+	Pif[]=MassMatr^-1*MassRHS; // L2-orthogonal projection of f
+}
+UpdatePif();
+
+Wh Piu, dxPiuEx, dyPiuEx; // Wh Piff = f; would be elementwise Lagrange interplolation
+func int ComputePiu() {
+	/*
+	Approximation of exact solution and its derivatives by L2 projection.
+
+	..math::
+		u_h = \Sigma_{L^2}(u)
+
+	Parameters:
+
+	Returns:
+
+	*/
+	varf L2proj1(Piu,wh)=int2d(Th)(Piu*wh) + int2d(Th)(uEx*wh); // L2 scalar product
+	matrix MassMatr1=L2proj1(Wh,Wh,solver=SolverLoc); // mass matrix
+	real[int] MassRHS1=L2proj1(0,Wh); // uEx on the RHS
+	Piu[]=MassMatr1^-1*MassRHS1; // L2-orthogonal projection of uEx
+
+	varf L2proj2(dxPiuEx,wh)=int2d(Th)(dxPiuEx*wh) + int2d(Th)(dxuEx*wh); // L2 scalar product
+	matrix MassMatr2=L2proj2(Wh,Wh,solver=SolverLoc); // mass matrix
+	real[int] MassRHS2=L2proj2(0,Wh); // dyuEx on the RHS
+	dxPiuEx[]=MassMatr2^-1*MassRHS2; // L2-orthogonal projection of dxuEx
+
+	varf L2proj3(dyPiuEx,wh)=int2d(Th)(dyPiuEx*wh) + int2d(Th)(dyuEx*wh); // L2 scalar product
+	matrix MassMatr3=L2proj3(Wh,Wh,solver=SolverLoc); // mass matrix
+	real[int] MassRHS3=L2proj3(0,Wh); // dyuEx on the RHS
+	dyPiuEx[]=MassMatr3^-1*MassRHS3; // L2-orthogonal projection of dyuEx
+
+}
+ComputePiu();
+
+// Space of piecewise constant polynomials for various plots.
+fespace Wh0(Th,P0);
+
+//*******************************************
+// Flux reconstruction by local equilibration
+//*******************************************
+
+// RT function spaces and variables.
+fespace RTGlob(Th,[RT,Pdisc]); // global
+RTGlob [sigma1,sigma2,phi]=[0,0,0]; // global equilibrated flux and potential
+
+func int ComputeEquilFlux() {
+	/*
+	Compute the equilibrated flux.
+
+	..math::
+		\sigma_h := \lambda \int_K (I_d - \kappa)  
+
+	Parameters:
+
+	Returns:
+		real: 
+
+	*/
+	fespace Vh1(Th,P1); // continuous piecewise affine polynomials
+	Vh1 psia=0;  // later: P1 hat function of the given vertex
+
+	mesh ThLoc=Th; // auxiliary mesh used for flux equilibration
+	fespace WhLoc(ThLoc,Pdisc); // local RT Lagrange multiplier space
+	fespace RTLoc(ThLoc,[RT,Pdisc]); // local
+
+	// global-local numbering
+	RTGlob [gnum1,gnum2,gnum3]; // auxiliary fields
+	gnum1[]= 1:gnum1[].n; // gnum1[] contains numbering of global DoFs, starting from 1, to #DoFs
+
+	for(int i=0; i<Th.nv; ++i) { // run through all vertices of the mesh
+		psia[][i]=1; // define the hat function for vertex i
+
+		//local to global numbering
+		int[int] n2o;
+
+		// patch around the vertex i as a support of the hat function psia
+		// label=10 for edges not previously at the boundary
+		// truncates the space RTLoc to the patch only
+		// sets the local to global numbering n2o
+		ThLoc = trunc(Th,psia>0,label=10, new2old = n2o); 
+
+		// link local -- global space
+		int[int] RRT = restrict(RTLoc, RTGlob, n2o);
+
+		if(verb>=2) plot(ThLoc, wait=Wait);
+
+		if (int1d(ThLoc)(psia)<1e-12) // check for an interior vertex  
+			{
+			ThLoc=change(ThLoc,flabel=10); // make sure label=10 on the whole boundary of the patch
+			if(verb>=2) cout << "label i " << i << " x" << Th(i).x << " y" << Th(i).y << endl;
+			}
+
+		RTLoc [sga1,sga2,gma],[v1,v2,q]; // variables for local patchwise equilibrated flux contributions
+
+		// local flux equilibration variational form
+		// zero normal flux on label = 10 boundary
+		// same as for the linear diffusion in TP1
+		varf a([sga1,sga2,gma],[v1,v2,q]) = int2d(ThLoc)([sga1,sga2]'*[v1,v2]
+			- gma*Div(v1,v2) - Div(sga1,sga2)*q - kapreg*kapreg*gma*q)+ on(10, sga1=0, sga2=0);
+
+		// matrix of the local flux equilibration
+		// same as for the linear diffusion in TP1
+		matrix MatrLocEquil=a(RTLoc,RTLoc, solver=SolverLoc); //LU also possible
+
+		// local flux equilibration right-hand side	form
+		// zero normal flux on label = 10 boundary
+		// multiplication by anlambda(Grad(uhprev)) wrt linear diffusion in TP1
+		varf l([unsused1,unsused2,unsused3],[v1,v2,q]) = int2d(ThLoc)(
+			- psia*((anlambda(Grad(uhprev))*Grad(uh))'*[v1,v2] + f*q)
+			+ Grad(psia)'*(anlambda(Grad(uhprev))*Grad(uh))*q)
+			+ on(10, unsused1 = 0, unsused2 = 0);
+
+		RTLoc [F,F1,F2]; // right-hand side variables
+		F[] = l(0,RTLoc); // right-hand side of the local flux equilibration
+
+		// solve the local equilibration problem to get [sigma1_a, sigma2_a, gamma_a]
+		sga1[] = MatrLocEquil^-1*F[]; // sga1[] contains the triplet sga1,sga2,gma
+
+		// write the local solution [sigma1_a, sigma2_a] into the global function [sigma1,sigma2] using the local to global numbering
+		sigma1[](RRT) += sga1[];	
+
+		psia[][i]=0; // undefine the hat function for vertex i
+	}
+}
+
+func real H1ErrDist() {
+	/*
+	Compute the exact H1-seminorm error and error distribution.
+
+	TODO: At the moment, the disrete solution at :math:`\lambda` is compared to the
+		exact solution at :math:`\lambda = =`. Can the exact solution at :math:`\lambda`
+		somehow be obtained?
+
+	..math::
+		\|\nabla (u - u_h)\|_K
+
+	Parameters:
+
+	Returns:
+		real: 
+
+	*/
+	varf ErrDistForm(unused,chiK) = int2d(Th)(
+		chiK*((Grad(uh)-[dxuEx,dyuEx])'
+		*(Grad(uh)-[dxuEx,dyuEx])));
+
+	Wh0 ErrDistField;
+	ErrDistField[]=ErrDistForm(0,Wh0);
+	real H1Error=sqrt(ErrDistField[].sum);
+	ErrDistField=sqrt(ErrDistField);
+	if(PlotErr)
+		{
+		real[int]isovalues=0:ErrDistField[].max/(NbIso-1):ErrDistField[].max; // isovalues from minimal to maximal value
+		plot(ErrDistField, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="H1 errors", ps=folder+"09_H1_errors.eps");
+		}
+	cout << "H1 error " << H1Error << endl;
+	return H1Error;
+}
+
+func real FluxErrDist() {
+	/*
+	Compute the exact flux error and error distribution.
+
+	TODO: At the moment, the disrete flux at :math:`\lambda` is compared to the exact
+		flux at :math:`\lambda = =`. Can the exact flux at :math:`\lambda` somehow be
+		obtained?
+
+	..math::
+		\|a(|\nabla u|) \nabla u - a(|\nabla u_h|) u_h)\|_K
+
+	Parameters:
+
+
+	Returns:
+		real: FluxErr
+
+	*/
+	varf FluxErrDistForm(unused,chiK) = int2d(Th)(
+		chiK*((an(Grad(uh))*Grad(uh)-an([dxuEx,dyuEx])*[dxuEx,dyuEx])'
+		*(an(Grad(uh))*Grad(uh)-an([dxuEx,dyuEx])*[dxuEx,dyuEx])));
+	Wh0 FluxErrDist;
+ 	FluxErrDist[] = FluxErrDistForm(0,Wh0);
+ 	real FluxErr = sqrt(FluxErrDist[].sum);
+ 	FluxErrDist = sqrt(FluxErrDist);
+	if(PlotErr) {
+		real[int]isovalues=0:FluxErrDist[].max/(NbIso-1):FluxErrDist[].max; // isovalues from minimal to maximal value
+		plot(FluxErrDist, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="flux errors", ps=folder+"10_flux_errors.eps");
+	}
+	cout << "flux error " << FluxErr << endl;
+  	return FluxErr;
+}
+
+real FluxEst, OscEst;
+Wh0 DiscEstDist;
+func real ComputeDiscEstDist() {
+	/*
+	Compute the a posteriori estimate and distribution of the discretization error at
+	the current lambda iterate.
+
+	..math::
+		\eta_{Disc,K}(u_{h,\lambda}) :=
+
+	Parameters:
+
+	Returns:
+		real: DiscEst
+
+	Writes:
+		Wh0: DiscEstDist
+		real: FluxEst
+		real: OscEst
+
+	*/
+ 	varf FluxEstDistForm(unused,chiK) = int2d(Th)(
+		chiK*((anlambda(Grad(uh))*Grad(uh) + [sigma1,sigma2])'
+		*(anlambda(Grad(uh))*Grad(uh) + [sigma1,sigma2])));
+ 	varf OscEstDistForm(unused,chiK) = int2d(Th)(
+		chiK*(hTriangle*hTriangle/pi/pi*(f-Pif)*(f-Pif)));
+
+ 	Wh0 FluxEstDist, OscEstDist;
+	FluxEstDist[] = FluxEstDistForm(0,Wh0);
+ 	OscEstDist[] = OscEstDistForm(0,Wh0);
+
+	DiscEstDist = sqrt(FluxEstDist)+sqrt(OscEstDist);
+	DiscEstDist = DiscEstDist*DiscEstDist;
+
+	real DiscEst = sqrt(DiscEstDist[].sum);
+	cout << "equilibrated flux estimator " << DiscEst << endl;
+ 	FluxEst = sqrt(FluxEstDist[].sum);
+	cout << "flux part " << FluxEst << endl;
+ 	OscEst = sqrt(OscEstDist[].sum);
+	cout << "oscillation part " << OscEst << endl;
+
+	DiscEstDist = sqrt(DiscEstDist);
+
+	// Plot the estimator distribution.
+	if(PlotEst) {
+		real[int]isovalues=0:DiscEstDist[].max/(NbIso-1):DiscEstDist[].max;
+		plot(DiscEstDist, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="equilibrated flux estimators", ps=folder+"11_eq_flux_estimators.eps");
+		real[int]isovalues2=0:OscEstDist[].max/(NbIso-1):OscEstDist[].max;
+		plot(OscEstDist, wait=Wait, value=1, fill=1, viso=isovalues2, hsv=jet, cmm="data oscillations", ps=folder+"11_data_oscillations.eps");
+	}
+
+  	Wh0 DivEstDist;
+  	real DivEst;
+
+	// Compute the divergence misfit of the equilibrated flux.
+	varf DivEstDistForm(unused,chiK) = int2d(Th)(
+		chiK*((Pif-Div(sigma1,sigma2))*(Pif-Div(sigma1,sigma2))));
+
+	DivEstDist[] = DivEstDistForm(0,Wh0);
+	DivEstDist = sqrt(DivEstDist);
+  	if(PlotRecFlux) {
+		fespace Vhp(Th,Pdiscp); // piecewise discontinuous polynomials on the mesh Th
+		Vhp sigma1vis=sigma1, sigma2vis=sigma2;
+		plot(Th, [sigma1vis, sigma2vis], wait=Wait, value=1, hsv=jet, cmm="equilibrated flux", ps=folder+"07_equilibrated_flux.eps");
+    	real[int]isovalues=0:DivEstDist[].max/(NbIso-1):DivEstDist[].max;
+    	plot(DivEstDist, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="divergence misfit of the equilibrated flux", ps=folder+"08_equilibrated_flux_divergence_misfit.eps");
+	}
+	DivEstDist = DivEstDist*DivEstDist;
+
+	DivEst = sqrt(DivEstDist[].sum);
+  	cout << "divergence check for the equilibrated flux " << DivEst << endl;
+  	return DiscEst;
+}
+
+Vh uhEx;
+func int ComputeExactProjection() {
+	/*
+	Compute the projection of the exact solution at :math:`\lambda = 0` onto
+	:math:`V_h`, given by
+	
+	..math::
+		(A(\nabla u_h), \nabla v_h) = (A(\nabla u), \nabla v_h) \@uad \forall v_h \in
+		V_h
+	*/
+	varf ProjectuEx(uhEx, vh) = int2d(Th)(an(Grad(uhEx))*Grad(vh))
+		- int2d(Th)(an(Grad(uEx))*Grad(vh))
+		+ on(1,2,3,4,uhEx=uEx);
+
+	real error = 1.0;
+	real tolerance = 1e-10;
+	while (error > tolerance) {
+		matrix A = ProjectuEx(Vh,Vh,solver=SolverGlob);
+		real[int] b = ProjectuEx(0,Vh);
+
+	}
+}
+
+
+func real ContErrDist() {
+	/*
+	Compute the exact continuation error and error distribution.
+
+	..math::
+		\mathcal{E}_{Cont} := \|a(|\nabla u_{h,\lambda}|) \nabla u_{h,\lambda} - a(|\nabla u_h|) u_h)\|_K
+
+	Parameters:
+
+	TODO: Implement this correctly!
+
+	Returns:
+		real: ContErr
+
+	*/	
+	varf ContErrDistForm(unused,chiK) = int2d(Th)(
+		chiK*((an(Grad(uh))*Grad(uh)-an([dxPiuEx,dyPiuEx])*[dxPiuEx,dyPiuEx])'
+		*(an(Grad(uh))*Grad(uh)-an([dxPiuEx,dyPiuEx])*[dxPiuEx,dyPiuEx])));
+	Wh0 ContErrDist;
+ 	ContErrDist[] = ContErrDistForm(0,Wh0);
+ 	real ContErr = sqrt(ContErrDist[].sum);
+ 	ContErrDist = sqrt(ContErrDist);
+	if(PlotErr) {
+		real[int]isovalues=0:ContErrDist[].max/(NbIso-1):ContErrDist[].max; // isovalues from minimal to maximal value
+		plot(ContErrDist, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="continuation errors", ps=folder+"13_continuation_errors.eps");
+	}
+	cout << "continuation error " << ContErr << endl;
+  	return ContErr;
+}
+
+Wh0 ContEstDist;
+func real ComputeContEstDist() {
+	/*
+	Compute the a posteriori error estimate and distribution of the continuation error.
+
+	..math::
+		\eta_{Cont,K}(u_{h,\lambda}) := 
+			\lambda \|I_d - a(|\nabla u_{h,\lambda}|)) \nabla u_{h,\lambda}\|_K  
+
+
+	Note: To calculate the estimate for the error between the FEM solution at
+		:math:`\lambda_1` and the FEM solution at :math:`\lambda_2`, the estimator needs
+		to be multiplied with :math:`\frac{\Delta \lambda}{\lambda_2} := \frac{\lambda_2 - \lambda_1}{\lambda_2}`
+
+	..math::
+		\eta_{C,K,\lambda_1}(u_{h,\lambda}) := \frac{\Delta \lambda} \|I_d - a(|\nabla
+			u_{h,\lambda_2}|)) \nabla u_{h,\lambda_2}\|_K  
+
+
+	Parameters:
+
+	Returns:
+		real: ContEst
+
+	Writes:
+		Wh0: ContEstDist
+
+	*/
+ 	varf ContEstDistForm(unused,chiK) = int2d(Th)(
+		Lambda*chiK*((Grad(uh) - an(Grad(uh))*Grad(uh))'*(Grad(uh) - an(Grad(uh))*Grad(uh)))
+	);
+	ContEstDist[] = ContEstDistForm(0,Wh0);
+	real ContEst = sqrt(ContEstDist[].sum);
+	cout << "continuation estimator " << ContEst << endl;
+	ContEstDist = sqrt(ContEstDist);
+
+	if(PlotEst) {
+		real[int]isovalues=0:ContEstDist[].max/(NbIso-1):ContEstDist[].max;
+		plot(ContEstDist, wait=Wait, value=1, fill=1, viso=isovalues, hsv=jet, cmm="continuation estimators", ps=folder+"14_cont_estimators.eps");
+	}
+
+  	return ContEst;
+}
+
+func real ComputeSeqDist() {
+	/*
+	Compute the error between two iterates and its distribution.
+
+	..math::
+		\| \nabla (u_h^{i + 1} - u_h) \|
+
+	Parameters:
+
+	Returns:
+		real: SeqErr
+
+	*/
+ 	varf SeqDistForm(unused,chiK) = int2d(Th)(chiK*((Grad(uh)-Grad(uhprev))'*(Grad(uh)-Grad(uhprev))));
+	Wh0 SeqDistField;
+ 	SeqDistField[] = SeqDistForm(0,Wh0);
+ 	real SeqErr = sqrt(SeqDistField[].sum);
+ 	SeqDistField = sqrt(SeqDistField);
+	cout << "difference of iterates " <<  SeqErr << endl;
+  	return SeqErr;
+}
+
+Vh uprime;
+func real ComputeTangent() {
+	/*
+	Compute the tangent of the homotopy curve at the current :math:`\lambda`.
+
+	..math::
+		|\tau(\lambda)| = sqrt(\tau(\lambda) \cdot \tau(\lambda)),
+		\text{where}
+		\tau(\lambda) = (\nabla_u(H(u,\lambda)))^{-1} \frac{\partial}{\partial \lambda} H(u,\lambda)
+
+	Parameters:
+
+	Returns:
+		real: TangentNorm
+
+	*/
+	varf HpartialLambdaForm(unused, chiK) = int2d(Th)(chiK*(an(Grad(uh))'*an(Grad(uh))))
+		- int2d(Th)(chiK*(Grad(uh)'*Grad(uh)));
+
+	matrix A = a(Vh,Vh,solver=SolverGlob);
+	// TODO: The Jacobian gets computed in each Newton iteration. However, if we store
+	// it globally and reuse it here, we get the error
+	// ``MATERROR 1 : VirtualMatrix:: no solver ?????``
+	// To make things more efficient, fix the error and do not calculate A twice.
+	real[int] HpartialLambda = HpartialLambdaForm(0,Vh);
+
+	uprime[] = A^(-1)*HpartialLambda;
+	uprime = uprime * uprime;
+	real TangentNorm = sqrt(uprime[].sum);
+	return TangentNorm;
+}
+
+Vh uprimeprevcontstep, uprimeprime;
+func real ComputeCurvature() {
+	/*
+	Compute the curvature of the homotopy curve at the current :math:`\lambda`.
+
+	..math::
+		\kappa(\lambda) = \sqrt{u''(\lambda) \cdot u''(\lambda9)},
+		\text{where}
+		u''(\lambda) \approx \frac{1}{\Delta x} (u'(\lambda) - u(\lambda - \Delta \lambda))
+
+	Parameters:
+
+	Returns:
+		real: Curvature
+
+	*/
+	// varf HpartialLambdaForm(unused, chiK) = int2d(Th)(chiK*(an(Grad(uh))'*an(Grad(uh))))
+	// 	- int2d(Th)(chiK*(Grad(uh)'*Grad(uh)));
+	// varf HpartialLambdaPrevForm(unused, chiK) = int2d(Th)(chiK*(an(Grad(uhprev))'*an(Grad(uhprev))))
+	// 	- int2d(Th)(chiK*(Grad(uhprev)'*Grad(uhprev)));
+
+	// real[int] HpartialLambda = HpartialLambdaForm(0,Vh);
+	// real[int] HpartialLambdaPrev = HpartialLambdaPrevForm(0,Vh);
+
+	// uprime[] = Jac^(-1)*HpartialLambda;
+	// uprimeprevcontstep[] = JacPrev^(-1)*HpartialLambdaPrev;
+	uprimeprime[] = (uprime[] - uprimeprevcontstep[]);
+	uprimeprime = uprimeprime / DeltaLambda;
+	uprimeprime = uprimeprime * uprimeprime;
+	real Curvature = sqrt(uprimeprime[].sum);
+	return Curvature;
+}
+
+Vh uhprevcontstep;
+func real ComputeSecant() {
+	/*
+	Compute the secant of the homotopy curve between the two most recent
+	:math:`\lambda`.
+
+	The tangent has value 1 in :math:`\lambda` direction. To be able to compare length
+	of the secant and the tangent, we thus scale the secant by :math:`\frac{1}{\Delta \lambda}`.
+
+	..math::
+		sqrt((u_{h,\lambda_l} - u_{h,\lambda_{l-1}})^2),
+
+	Parameters:
+
+	Returns:
+		real: SecantNorm
+
+	*/
+	Vh usecant = uh - uhprevcontstep;
+	usecant = usecant * usecant;
+	real SecantNorm = sqrt(usecant[].sum) / DeltaLambda;
+	return SecantNorm;
+}
+
+// Error and estimator arrays
+// Todo: This should be arrays of arrays!
+real[int] DiscEsts(MaxContIter + 1);
+real[int] ContEsts(MaxContIter + 1);
+real[int] ContEstsPerLambda(MaxContIter + 1);
+
+// real[int] H1Errors(MaxContIter + 1);
+// real[int] FluxErrors(MaxContIter + 1);
+real[int] ContErrors(MaxContIter + 1);
+
+real[int] FluxEffInds(MaxContIter + 1);
+real[int] ContEffInds(MaxContIter + 1);
+
+real[int] ContIterations(MaxContIter + 1);
+real[int] NonlinearIterations(MaxContIter + 1);
+real[int] LastNonlinearError(MaxContIter + 1);
+real[int] Lambdas(MaxContIter + 1);
+
+real[int] Tangents(MaxContIter + 1);
+real[int] Curvatures(MaxContIter + 1);
+real[int] Secants(MaxContIter + 1);
+Curvatures[0] = 0;
+Secants[0] = 0;
+
+func int PlotConvergence() {
+	if (SaveGnuPlot) {
+		SetupSemiLogYPlot(folder, runname, "Continuation step j", "Error and estimators");
+		string datafile;
+		// datafile = "Flux error";
+		// AddPlotToOutput(ContIterations, FluxErrors, folder, runname,  datafile, MaxContIter + 1);
+		// datafile = "H1 error";
+		// AddPlotToOutput(NonlinearIterations, H1Errors, folder, runname, datafile, MaxContIter + 1);
+		if(case != 5) {
+			datafile = "Continuation error";
+			AddPlotToOutput(ContIterations, ContErrors, folder, runname,  datafile, MaxContIter + 1);
+		}
+		datafile = "Discretization estimator";
+		AddPlotToOutput(ContIterations, DiscEsts, folder, runname, datafile, MaxContIter + 1);
+		datafile = "Continuation estimator";
+		AddPlotToOutput(ContIterations, ContEsts, folder, runname, datafile, MaxContIter + 1);
+		datafile = "Continuation estimator per lambda";
+		for (int j = 0; j < MaxContIter + 1; j++) {
+			if(Lambdas[j] != 0) ContEstsPerLambda[j] = ContEsts[j] / Lambdas[j];
+			else ContEstsPerLambda[j] = 0;
+		}
+
+		AddPlotToOutput(ContIterations, ContEstsPerLambda, folder, runname, datafile, MaxContIter + 1);
+		// datafile = "Flux eff. index";
+		// AddPlotToOutput(NonlinearIterations, FluxEffInds, folder, runname, datafile, MaxContIter + 1);
+		if(case != 5) {
+			datafile = "Continuation eff. index";
+			AddPlotToOutput(ContIterations, ContEffInds, folder, runname, datafile, MaxContIter + 1);
+		}
+		datafile = "No. nonlinear iterations";
+		AddPlotToOutput(ContIterations, NonlinearIterations, folder, runname, datafile, MaxContIter + 1);
+		// datafile = "Nonlinear error last nonlinear iteration";
+		// AddPlotToOutput(ContIterations, LastNonlinearError, folder, runname, datafile, MaxContIter + 1);
+		datafile = "lambda";
+		AddPlotToOutput(ContIterations, Lambdas, folder, runname, datafile, MaxContIter + 1);
+		datafile = "tangent";
+		AddPlotToOutput(ContIterations, Tangents, folder, runname, datafile, MaxContIter + 1);
+		datafile = "curvature";
+		AddPlotToOutput(ContIterations, Curvatures, folder, runname, datafile, MaxContIter + 1);
+		datafile = "secant";
+		AddPlotToOutput(ContIterations, Secants, folder, runname, datafile, MaxContIter + 1);
+		exec("gnuplot " + folder + runname + ".plt");
+		exec("rm " + folder + runname + ".plt");
+	}
+}
+
+real NonlinearErr;
+func int NonlinearLoop() {
+	/*
+	Run the nonlinear loop until convergence or max. number of iterations.
+
+	Parameters:
+
+	Returns:
+		int k + 1: Number of nonlinear iterations.
+
+	*/
+	int k = 0; // Nonlinear iteration counter
+	NonlinearErr = NonlinearSolverTol + 1; // Nonlinear iteration error
+
+	while((k < MaxNonlinearIter) && (NonlinearErr > NonlinearSolverTol)) {
+		cout <<  " ============= Nonlinear iteration k = " << k + 1 <<  " ======= " << endl;
+		NonlinearStep();
+		NonlinearErr = ComputeSeqDist();
+		uhprev = uh;
+		k++;
+	}
+
+	if (NonlinearErr < NonlinearSolverTol) {
+		cout << "Tolerance reached" << endl;
+	}
+	if (k >= MaxNonlinearIter) {
+		cout << "MaxNonlinearIter reached" << endl;
+	}
+
+	return k + 1;
+}
+
+func int ContinuationLoop() {
+	// Reset initial guess.
+
+	// Effectivities
+	real H1EffInd, FluxEffInd, ContEffInd;
+	int j = 0; // Continuation iterate counter
+
+	// Solver
+	fespace VhVec(Th,[Pcontl, Pcontl]); // Space for object based on the gradient
+	VhVec [d1, d2];
+	VhVec [l1, l2];
+	VhVec [s1, s2];
+
+	// Initialize the estimators.
+	real DiscEst = 1;
+	real ContEst = Gamma1*DiscEst + 1;
+
+	while((j < MaxContIter) && (ContEst > Gamma1*DiscEst)) {
+		cout << "======= Continuation iteration j = " << j + 1 <<  " =======" << endl;
+		cout << "========================= lambda = " << Lambda <<  " =======" << endl;
+
+		uhprevcontstep = uh;
+		uprimeprevcontstep = uprime;
+
+		NonlinearIterations[j] = NonlinearLoop();
+		LastNonlinearError[j] = NonlinearErr;
+
+		// Compute error estimates.
+		[sigma1,sigma2,phi]=[0,0,0];
+		UpdatePif();
+		ComputeEquilFlux();
+		ContEst = ComputeContEstDist();
+		DiscEst = ComputeDiscEstDist();
+		ContEsts[j] = ContEst;
+		DiscEsts[j] = DiscEst;
+		// H1Errors[j] = H1ErrDist();
+		// FluxErrors[j] = FluxErrDist();
+		ContErrors[j] = ContErrDist();
+		ContIterations[j] = j + 1;
+		Lambdas[j] = Lambda;
+
+		// FluxEffInd=DiscEsts[j]/FluxErrors[j];
+		// FluxEffInds[j] = FluxEffInd;
+		// cout << "Effectivity index, flux error " << FluxEffInd << endl;
+		ContEffInd=ContEsts[j]/ContErrors[l];
+		ContEffInds[j] = ContEffInd;
+		cout << "Effectivity index, continuation error " << ContEffInd << endl;
+
+		// Plot solutions
+		if(PlotSolEx) FPlotSolEx();
+		if(PlotSolAppr) FPlotSolAppr();
+		if(PlotSolApprFluxes) FPlotSolApprFluxes();
+
+		// Update lambda
+		ContinuationStep();
+
+		// Store previous tangent and compute tangent and curvature.
+		Tangents[j] = ComputeTangent();
+		if (j >= 1) {
+			Curvatures[j] = ComputeCurvature();
+			Secants[j] = ComputeSecant();
+		}
+		l++;
+	}
+
+	if (j >= MaxContIter) {
+		cout << "MaxContIter reached" << endl;
+	}
+	if (ContEst < Gamma1*DiscEst) {
+		cout << "Continuation error smaller than " << Gamma1 << " times discretization error" << endl;
+	}
+
+	PlotConvergence();
+
+}
+
+func int ResetArrays() {
+	for (int j = 0; j < MaxContIter + 1; j++) {
+		ContEsts[j] = 0.0;
+		DiscEsts[j] = 0.0;
+
+		// H1Errors[j] = 0.0;
+		// FluxErrors[j] = 0.0;
+		ContErrors[j] = 0.0;
+
+		FluxEffInds[j] = 0.0;
+		ContEffInds[j] = 0.0;
+
+		ContIterations[j] = 0.0;
+		NonlinearIterations[j] = 0.0;
+		LastNonlinearError[j] = 0.0;
+		Lambdas[j] = 0.0;
+
+		Tangents[j] = 0.0;
+		Curvatures[j] = 0.0;
+		Secants[j] = 0.0;
+	}
+}
+
+// Run for different nonlinearity strengths and decays.
+for (int i = 3; i < 5; i++) {
+	m = i*5000.0;
+	for (int l = 0; l < 5; l++) {
+		Decay = 0.99 ^ ((l + 1)^2);
+		runname = "m_" + m + "_fixed_decay_"  + Decay;
+		// Reset Lambda and initial guess
+		Lambda = 1;
+		uhprev = uh0;
+		ResetArrays();
+		ContinuationLoop();
+	}
+
+}

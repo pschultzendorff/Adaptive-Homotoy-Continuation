@@ -1,0 +1,74 @@
+func int SetupSemiLogYPlot(
+    string folder,
+    string runname,
+    string xlabel,
+    string ylabel
+    ) {
+    try {
+        exec("mkdir " + folder);
+    }
+    catch (...) {
+      cout << "folder " << folder << " already exists" << endl; 
+    }
+    string mypath = folder + runname;
+    ofstream gnu(mypath + ".plt");
+    gnu << "set logscale y 10" << endl;
+    gnu << "set terminal png size 800,500" << endl;
+    gnu << "set output '" << mypath + ".png'" << endl;
+    gnu << "set title '" << runname + "'" << endl;
+    gnu << "set xlabel '" << xlabel << "'" << endl;
+    gnu << "set ylabel '" << ylabel << "'" << endl;
+    gnu << "plot"; 
+}
+
+func int SetupLogLogPlot(
+    string folder,
+    string runname,
+    string xlabel,
+    string ylabel
+    ) {
+    try {
+        exec("mkdir " + folder);
+    }
+    catch (...) {
+      cout << "folder " << folder << " already exists" << endl; 
+    }
+    string mypath = folder + runname;
+    ofstream gnu(mypath + ".plt");
+    gnu << "set logscale xy 10" << endl;
+    gnu << "set terminal png size 800,500" << endl;
+    gnu << "set output '" << mypath + ".png'" << endl;
+    gnu << "set title '" << runname + "'" << endl;
+    gnu << "set xlabel '" << xlabel << "'" << endl;
+    gnu << "set ylabel '" << ylabel << "'" << endl;
+    gnu << "plot"; 
+}
+
+func int CreateDataFile(
+    real[int] xx,
+    real[int] yy,
+    string folder,
+    string datafile,
+    int len
+    ) {
+    string mypath = folder + datafile;
+    ofstream gnudat(mypath + ".dat");
+    //cout << "k final " << k << endl;
+    for (int i = 0; i < len; i++)
+        gnudat << xx[i] << " " << yy[i] << endl;
+}
+
+func int AddPlotToOutput(
+    real[int] xx,
+    real[int] yy,
+    string folder,
+    string runname,
+    string datafile,
+    int len
+    ) {
+    CreateDataFile(xx, yy, folder, datafile, len);
+    if(verb>=2) cout << "Saving to " << datafile << endl;
+    ofstream gnu(folder + runname + ".plt", append);
+    gnu  << " '" << folder + datafile + ".dat" << "'" <<  " with linespoints" 
+    << " title '" << datafile << "',\\\n" ;
+}

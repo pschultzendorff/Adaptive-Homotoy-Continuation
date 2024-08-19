@@ -1,0 +1,50 @@
+
+// Problem parameters
+real m = 10.0;
+real s0 = 2.0;
+
+func real varphi(real s) {
+	if (s <= s0) return 0.5 * (s - s0)^2 + s0 * s - 0.5 * (s0^2);
+	if (s > s0) return m * 0.5 * (s - s0)^2 + s0 * s - 0.5 * (s0^2);
+}
+
+func real varphiprime(real s) {
+	if (s <= s0) return s;
+	if (s > s0) return  m * (s - s0) + s0;
+}
+
+func real varphiprimeprime(real s) {
+	if (s <= s0) return 1;
+	if (s > s0) return  m;
+}
+
+func real funca(real s) {
+	return varphiprime(s) / s;
+}
+
+func real funcaprime(real s) {
+	return (s*varphiprimeprime(s) - varphiprime(s))/ s^2;
+}
+
+func theta=atan2(y, x)-2*pi*fmin(sign(y),0); // we need the angle theta between 0 and 3*pi/2
+func r=(x^2+y^2)^(1/2.0); // radius
+func uEx = r^(2/3.0)*sin(2*theta/3.0); 	// exact solution in polar coordinates
+func dxuEx = -2*sin(theta/3.0)/r^(1/3.0)/3.0;  	// exact solution x derivative - simplified expression and 3.0 for the C++ convention
+func dyuEx = 2*cos(theta/3.0)/r^(1/3.0)/3.0;  	// exact solution y derivative - simplified expression and 3.0 for the C++ convention
+func duExSize = sqrt(dxuEx^2+dyuEx^2); // exact solution gradient magnitude
+func f = 0; 	// right-hand side source term
+func gd = r^(2/3.0)*sin(2*theta/3.0);  	// exact solution on the Dirichlet boundary
+func uh0 = 10*sin(x)*cos(y); // very bad initial guess, just to get things started
+
+// define the computational mesh
+func mesh GenerateMesh(int nds) {
+	border b1(t=0, 1){x=t; y=0; label=1;};
+	border b2(t=0, 1){x=1; y=t; label=1;};
+	border b3(t=0, 2){x=1-t; y=1; label=1;};
+	border b4(t=0, 2){x=-1; y=1-t; label=1;};
+	border b5(t=0, 1){x=-1+t; y=-1; label=1;};
+	border b6(t=0, 1){x=0; y=-1+t; label=1;};
+	//define the computational mesh 
+	mesh Th = buildmesh(b1(nds) + b2(nds) + b3(2*nds) + b4(2*nds) + b5(nds) + b6(nds));
+    return Th;
+}
